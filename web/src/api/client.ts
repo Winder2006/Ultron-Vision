@@ -444,11 +444,20 @@ class StreamClient {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
-    
+
     this.callback = null;
-    
+
     if (this.ws) {
-      this.ws.close();
+      // Detach handlers BEFORE closing so a close during the CONNECTING phase
+      // doesn't fire onclose -> scheduleReconnect (orphaned reconnect loop).
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
+      try {
+        this.ws.close();
+      } catch {
+        /* closing a CONNECTING socket can throw in some browsers — ignore */
+      }
       this.ws = null;
     }
   }

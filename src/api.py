@@ -179,22 +179,56 @@ def initialize_system():
     logger.info("System initialized")
 
 
+import threading as _threading
+
+# --- Background detection worker -------------------------------------------
+# Heavy face recognition + motion detection MUST NOT run in the camera capture
+# thread: a slow model (e.g. the GPU CNN detector) would stall frame grabbing
+# and drop FPS to zero. Instead the capture thread just hands off the latest
+# frame; this worker processes the most recent frame per camera and silently
+# drops older ones when inference can't keep up.
+_proc_lock = _threading.Lock()
+_proc_latest: Dict[str, Any] = {}
+_proc_event = _threading.Event()
+_proc_running = True
+
+
 def process_frame(frame):
-    """Process frame through all detection pipelines"""
+    """Camera capture-thread callback. Stays fast: buffers for recording and
+    hands the frame to the detection worker; never blocks on inference."""
     try:
-        # Face recognition (every 5th frame for performance)
-        if frame.frame_id % 5 == 0:
-            face_engine.process_frame(frame, scale=0.5)
-        
-        # Motion detection (every 2nd frame)
-        if frame.frame_id % 2 == 0:
-            motion_manager.detect(frame)
-        
-        # Add to recorder
         recorder_manager.add_frame(frame)
-        
     except Exception as e:
-        logger.error(f"Error processing frame: {e}")
+        logger.error(f"Recorder error: {e}")
+
+    with _proc_lock:
+        _proc_latest[frame.camera_id] = frame
+    _proc_event.set()
+
+
+def _detection_worker():
+    """Runs face recognition + motion detection off the capture thread."""
+    while _proc_running:
+        _proc_event.wait(timeout=1.0)
+        _proc_event.clear()
+        with _proc_lock:
+            frames = list(_proc_latest.values())
+            _proc_latest.clear()
+        for frame in frames:
+            try:
+                face_engine.process_frame(frame, scale=0.5)
+            except Exception as e:
+                logger.error(f"Face recognition error: {e}")
+            try:
+                motion_manager.detect(frame)
+            except Exception as e:
+                logger.error(f"Motion detection error: {e}")
+
+
+_detection_thread = _threading.Thread(
+    target=_detection_worker, name="detection-worker", daemon=True
+)
+_detection_thread.start()
 
 
 @asynccontextmanager

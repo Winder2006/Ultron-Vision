@@ -1,0 +1,239 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-accent: #e63333;
+  --color-accent-dim: #cc0000;
+  --color-bg: #0a0000;
+  --color-surface: #150000;
+  --color-border: #2d0a0a;
+  --color-text: #f5e0e0;
+  --color-muted: #7d4545;
+  --color-danger: #ff4444;
+  --color-warning: #ff8800;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Custom utility classes */
+@layer components {
+  .glow-text {
+    text-shadow: 0 0 10px var(--color-accent), 0 0 20px var(--color-accent);
+  }
+  
+  .glow-border {
+    box-shadow: 0 0 10px var(--color-accent), inset 0 0 10px rgba(230, 51, 51, 0.1);
+  }
+  
+  .scanline {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .scanline::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: linear-gradient(
+      to bottom,
+      transparent,
+      rgba(230, 51, 51, 0.3),
+      transparent
+    );
+    animation: scan 2s linear infinite;
+    pointer-events: none;
+  }
+  
+  .glass {
+    background: rgba(21, 0, 0, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--color-border);
+  }
+  
+  .card {
+    @apply bg-terminal-surface border border-terminal-border rounded-lg;
+  }
+  
+  .card-hover {
+    @apply card transition-all duration-200 hover:border-terminal-accent/50 hover:shadow-lg hover:shadow-terminal-accent/10;
+  }
+  
+  .btn {
+    @apply px-4 py-2 rounded font-medium transition-all duration-200;
+  }
+  
+  .btn-primary {
+    @apply btn bg-terminal-accent text-terminal-bg hover:bg-terminal-accent/80;
+  }
+  
+  .btn-secondary {
+    @apply btn bg-terminal-surface border border-terminal-border text-terminal-text hover:border-terminal-accent/50;
+  }
+  
+  .btn-danger {
+    @apply btn bg-terminal-danger/20 border border-terminal-danger text-terminal-danger hover:bg-terminal-danger/30;
+  }
+  
+  .input {
+    @apply bg-terminal-bg border border-terminal-border rounded px-3 py-2 text-terminal-text focus:outline-none focus:border-terminal-accent transition-colors;
+  }
+  
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  }
+  
+  .badge-success {
+    @apply badge bg-orange-600/20 text-orange-400 border border-orange-600/30;
+  }
+  
+  .badge-warning {
+    @apply badge bg-yellow-500/20 text-yellow-400 border border-yellow-500/30;
+  }
+  
+  .badge-danger {
+    @apply badge bg-red-500/20 text-red-400 border border-red-500/30;
+  }
+  
+  .badge-info {
+    @apply badge bg-terminal-accent/20 text-terminal-accent border border-terminal-accent/30;
+  }
+}
+
+/* Animations */
+@keyframes scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(2500%); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
+}
+
+/* Face detection overlay styles */
+.face-box {
+  position: absolute;
+  border: 2px solid;
+  pointer-events: none;
+}
+
+.face-box.known {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 10px var(--color-accent);
+}
+
+.face-box.unknown {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 10px var(--color-danger);
+}
+
+.face-label {
+  position: absolute;
+  top: -24px;
+  left: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.face-label.known {
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+
+.face-label.unknown {
+  background: var(--color-danger);
+  color: white;
+}
+
+/* Motion region overlay */
+.motion-region {
+  position: absolute;
+  background: rgba(255, 170, 0, 0.2);
+  border: 1px solid rgba(255, 170, 0, 0.5);
+  pointer-events: none;
+}
+
+/* Tracking indicator */
+.tracking-crosshair {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--color-accent);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: pulse-glow 1s ease-in-out infinite;
+}
+
+.tracking-crosshair::before,
+.tracking-crosshair::after {
+  content: '';
+  position: absolute;
+  background: var(--color-accent);
+}
+
+.tracking-crosshair::before {
+  width: 2px;
+  height: 10px;
+  top: -15px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.tracking-crosshair::after {
+  width: 10px;
+  height: 2px;
+  top: 50%;
+  left: -15px;
+  transform: translateY(-50%);
+}
+

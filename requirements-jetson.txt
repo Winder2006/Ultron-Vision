@@ -1,0 +1,20 @@
+# ULTRON VISION — Jetson Orin AGX dependencies
+# ============================================================================
+# DO NOT install opencv-python, dlib, or face_recognition from this file.
+#   - OpenCV ships with JetPack already built with CUDA + GStreamer.
+#     Installing the pip wheel SHADOWS it and loses CUDA + RTSP/GStreamer.
+#   - dlib must be COMPILED FROM SOURCE with DLIB_USE_CUDA=1 for GPU face
+#     recognition (model: "cnn"). The pip wheel is CPU-only.
+# See DEPLOY_ORIN.md for the build steps. Install the rest with:
+#   pip install -r requirements-jetson.txt
+# ============================================================================
+
+numpy>=1.24.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+pyyaml>=6.0
+Pillow>=10.0.0
+websockets>=12.0
+httpx>=0.25.0
+aiofiles>=23.0.0

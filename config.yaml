@@ -1,0 +1,67 @@
+# ============================================
+# CAMERA CONFIGURATION
+# ============================================
+# For testing with webcam, use: "webcam:0" (or "webcam:1" for second camera)
+# For IP cameras, use RTSP URL: "rtsp://admin:PASSWORD@IP:554/h264Preview_01_main"
+
+cameras:
+  # Webcam for testing (change to RTSP URL when you have the real camera)
+  - id: "main_cam"
+    name: "Test Webcam"
+    rtsp_url: "webcam:0"  # Use your computer's webcam for testing
+    ptz_enabled: false
+    api_url: null
+
+  # Example Reolink camera config (uncomment when ready):
+  # - id: "front_door"
+  #   name: "Front Door"
+  #   rtsp_url: "rtsp://admin:PASSWORD@192.168.1.100:554/h264Preview_01_main"
+  #   ptz_enabled: true
+  #   api_url: "http://192.168.1.100"
+
+  # ── Orin AGX multi-cam example (uncomment on Jetson) ──────────────────────
+  # - id: "cam1"
+  #   name: "Entrance"
+  #   rtsp_url: "rtsp://admin:PASSWORD@192.168.1.101:554/h264Preview_01_main"
+  #   ptz_enabled: false
+  #   api_url: null
+  # - id: "cam2"
+  #   name: "Hallway"
+  #   rtsp_url: "rtsp://admin:PASSWORD@192.168.1.102:554/h264Preview_01_main"
+  #   ptz_enabled: false
+  #   api_url: null
+  # - id: "cam3"
+  #   name: "Perimeter"
+  #   rtsp_url: "rtsp://admin:PASSWORD@192.168.1.103:554/h264Preview_01_main"
+  #   ptz_enabled: true
+  #   api_url: "http://192.168.1.103"
+
+face_recognition:
+  model: "hog"  # "hog" for CPU | "cnn" for GPU (use "cnn" on Orin AGX)
+  tolerance: 0.6
+  min_face_size: 50
+
+motion_detection:
+  sensitivity: 25
+  min_area: 500
+
+recording:
+  enabled: true
+  path: "data/recordings"     # Orin: use "/mnt/nvme/recordings" (fast NVMe, not eMMC)
+  max_days: 14
+  event_buffer_seconds: 30
+
+activity:
+  loitering_threshold_seconds: 60
+  quiet_hours_start: "23:00"
+  quiet_hours_end: "06:00"
+
+api:
+  host: "0.0.0.0"
+  port: 8200
+
+ui:
+  default_view: "cameras"
+  theme: "dark"
+  max_cameras_per_row: 3
+

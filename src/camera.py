@@ -18,7 +18,7 @@ import numpy as np
 import threading
 import time
 import logging
-from typing import Dict, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass
 from queue import Queue, Empty
 from datetime import datetime
@@ -108,7 +108,7 @@ class CameraStream:
         self._fps_counter = 0
         self._fps_start_time = time.time()
         
-        self._on_frame_callbacks: list[Callable[[Frame], None]] = []
+        self._on_frame_callbacks: List[Callable[[Frame], None]] = []
         
         logger.info(f"CameraStream initialized for {config.name} ({config.id})")
     
@@ -382,7 +382,7 @@ class CameraManager:
             camera.stop()
         logger.info("All cameras stopped")
     
-    def get_statuses(self) -> list[CameraStatus]:
+    def get_statuses(self) -> List[CameraStatus]:
         """Get status of all cameras"""
         return [camera.get_status() for camera in self._cameras.values()]
     

@@ -164,7 +164,9 @@ export default function VideoCanvas({
       }
     };
 
-    const overlayTimer = window.setInterval(draw, 150);
+    // Redraw often so a new detection paints ASAP (boxes only move when a new
+    // faces_detected event updates facesRef, but this bounds the paint delay).
+    const overlayTimer = window.setInterval(draw, 40);
 
     return () => {
       window.clearInterval(overlayTimer);

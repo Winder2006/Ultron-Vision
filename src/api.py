@@ -161,8 +161,7 @@ def initialize_system():
             name=cam_config["name"],
             rtsp_url=cam_config["rtsp_url"],
             ptz_enabled=cam_config.get("ptz_enabled", False),
-            api_url=cam_config.get("api_url"),
-            codec=cam_config.get("codec", "h264")
+            api_url=cam_config.get("api_url")
         ))
         
         # Add PTZ controller if enabled

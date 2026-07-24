@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Face, TrackingStatus } from '../api/client';
 // Vendored go2rtc WebRTC client (no type declarations).
 // @ts-ignore
-import { VideoRTC } from '../lib/video-rtc.js';
+import { VideoRTC } from '../vendor/video-rtc.js';
 
 // Register the go2rtc custom element once.
 if (typeof window !== 'undefined' && !customElements.get('video-stream')) {

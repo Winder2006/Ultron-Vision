@@ -392,18 +392,25 @@ async def stream_camera(websocket: WebSocket, camera_id: str):
                 if frame and frame.frame_id != last_frame_id:
                     last_frame_id = frame.frame_id
 
+                    # Downscale to a 720p-wide preview: a full 2K frame is
+                    # ~10x the pixels a live-view needs and decoding it per
+                    # frame is the main UI-lag source. Detection still uses the
+                    # full-res frame; we send the ORIGINAL dims so the frontend
+                    # scales face-box overlays correctly.
                     # Shared per-frame cache: one encode regardless of client
-                    # count, and off the event loop so it can't stall other
-                    # websockets while encoding a 2K frame.
-                    # run_in_executor (not asyncio.to_thread — that's 3.9+ and
-                    # the Jetson runs Python 3.8).
-                    jpeg = await loop.run_in_executor(None, camera.get_latest_jpeg, 70)
+                    # count, off the event loop (run_in_executor, not
+                    # asyncio.to_thread — that's 3.9+ and the Jetson runs 3.8).
+                    jpeg = await loop.run_in_executor(
+                        None, camera.get_latest_jpeg, 70, 1280
+                    )
                     if jpeg is None:
                         continue
                     message = {
                         "type": "frame",
                         "timestamp": frame.timestamp.isoformat(),
                         "frame_id": frame.frame_id,
+                        "frame_w": frame.width,
+                        "frame_h": frame.height,
                         "data": base64.b64encode(jpeg).decode()
                     }
                     

@@ -126,15 +126,27 @@ export default function VideoCanvas({
       }
     };
 
+    // Overlays are in full-res capture coordinates; the preview JPEG is
+    // downscaled. Prefer the original dims the stream reports; fall back to
+    // the decoded image size only if they're absent.
+    let haveDims = false;
+
     img.onload = () => {
-      frameW = img.naturalWidth || frameW;
-      frameH = img.naturalHeight || frameH;
+      if (!haveDims) {
+        frameW = img.naturalWidth || frameW;
+        frameH = img.naturalHeight || frameH;
+      }
       draw();
     };
 
     streamClient.connect(
       (frame) => {
         setConnected(true);
+        if (frame.frame_w && frame.frame_h) {
+          frameW = frame.frame_w;
+          frameH = frame.frame_h;
+          haveDims = true;
+        }
         img.src = `data:image/jpeg;base64,${frame.data}`;
       },
       // Feed dropped (Jetson reboot, network blip): flip back to the

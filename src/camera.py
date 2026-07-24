@@ -96,9 +96,10 @@ class CameraStream:
         self._cap: Optional[cv2.VideoCapture] = None
         self._frame_queue: Queue[Frame] = Queue(maxsize=frame_queue_size)
         self._latest_frame: Optional[Frame] = None
-        # Lazy JPEG cache: quality -> (frame_id, bytes). Encoding happens on
-        # the first consumer request per frame, never in the capture thread.
-        self._jpeg_cache: Dict[int, Tuple[int, bytes]] = {}
+        # Lazy JPEG cache: (quality, max_width) -> (frame_id, bytes). Encoding
+        # happens on the first consumer request per frame, not in the capture
+        # thread.
+        self._jpeg_cache: Dict[Tuple[int, Optional[int]], Tuple[int, bytes]] = {}
         self._frame_lock = threading.Lock()
         
         self._running = False
@@ -172,24 +173,40 @@ class CameraStream:
         with self._frame_lock:
             return self._latest_frame
     
-    def get_latest_jpeg(self, quality: int = 80) -> Optional[bytes]:
+    def get_latest_jpeg(
+        self, quality: int = 80, max_width: Optional[int] = None
+    ) -> Optional[bytes]:
         """Get the most recent frame as JPEG bytes.
 
-        Encoded lazily and cached per (frame, quality), so N stream clients
-        cost one encode per frame and an unwatched camera costs zero.
+        Encoded lazily and cached per (frame, quality, max_width), so N stream
+        clients cost one encode per frame and an unwatched camera costs zero.
+
+        max_width downscales for browser preview — a full 2K frame is ~10x the
+        pixels a live-view canvas needs, and decoding it per-frame is the main
+        source of UI lag. Detection still runs on the full-res frame.
         """
+        key = (quality, max_width)
         with self._frame_lock:
             frame = self._latest_frame
             if frame is None:
                 return None
-            cached = self._jpeg_cache.get(quality)
+            cached = self._jpeg_cache.get(key)
             if cached is not None and cached[0] == frame.frame_id:
                 return cached[1]
-        # Encode outside the lock — never block the capture thread on this.
-        jpeg = frame.to_jpeg(quality=quality)
+        # Encode (and optionally downscale) outside the lock — never block
+        # the capture thread on this.
+        image = frame.image
+        if max_width and frame.width > max_width:
+            new_h = int(round(frame.height * (max_width / float(frame.width))))
+            image = cv2.resize(image, (max_width, new_h), interpolation=cv2.INTER_AREA)
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        ok, buffer = cv2.imencode('.jpg', image, encode_param)
+        if not ok:
+            return None
+        jpeg = buffer.tobytes()
         with self._frame_lock:
             if self._latest_frame is frame:
-                self._jpeg_cache[quality] = (frame.frame_id, jpeg)
+                self._jpeg_cache[key] = (frame.frame_id, jpeg)
         return jpeg
     
     def get_status(self) -> CameraStatus:

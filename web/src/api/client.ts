@@ -393,7 +393,15 @@ class WSClient {
 }
 
 // Stream Client for video frames
-type FrameCallback = (frame: { data: string; timestamp: string; frame_id: number }) => void;
+type FrameCallback = (frame: {
+  data: string;
+  timestamp: string;
+  frame_id: number;
+  // Original capture dimensions (the preview JPEG may be downscaled) — used
+  // to scale detection overlays, which are in full-res coordinates.
+  frame_w?: number;
+  frame_h?: number;
+}) => void;
 
 class StreamClient {
   private ws: WebSocket | null = null;
@@ -433,6 +441,8 @@ class StreamClient {
               data: data.data,
               timestamp: data.timestamp,
               frame_id: data.frame_id,
+              frame_w: data.frame_w,
+              frame_h: data.frame_h,
             });
           }
         } catch (e) {

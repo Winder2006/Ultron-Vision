@@ -383,7 +383,8 @@ async def stream_camera(websocket: WebSocket, camera_id: str):
     
     try:
         last_frame_id = 0
-        
+        loop = asyncio.get_event_loop()
+
         while True:
             try:
                 frame = camera.get_latest_frame()
@@ -394,7 +395,9 @@ async def stream_camera(websocket: WebSocket, camera_id: str):
                     # Shared per-frame cache: one encode regardless of client
                     # count, and off the event loop so it can't stall other
                     # websockets while encoding a 2K frame.
-                    jpeg = await asyncio.to_thread(camera.get_latest_jpeg, 70)
+                    # run_in_executor (not asyncio.to_thread — that's 3.9+ and
+                    # the Jetson runs Python 3.8).
+                    jpeg = await loop.run_in_executor(None, camera.get_latest_jpeg, 70)
                     if jpeg is None:
                         continue
                     message = {

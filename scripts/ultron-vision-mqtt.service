@@ -1,0 +1,22 @@
+# ULTRON VISION — Jetson MQTT vision service systemd unit.
+# Install:
+#   sudo cp scripts/ultron-vision-mqtt.service /etc/systemd/system/
+#   sudo sed -i "s/<user>/$USER/g" /etc/systemd/system/ultron-vision-mqtt.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ultron-vision-mqtt
+#   journalctl -u ultron-vision-mqtt -f
+
+[Unit]
+Description=ULTRON VISION Jetson MQTT vision service
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+User=<user>
+WorkingDirectory=/home/<user>/ultron-vision
+ExecStart=/home/<user>/ultron-vision/venv/bin/python -m jetson.vision_service
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

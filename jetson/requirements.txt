@@ -1,0 +1,21 @@
+# ULTRON VISION — Jetson MQTT vision service dependencies
+# ============================================================================
+# Install into the SAME venv created by setup_orin.sh (--system-site-packages,
+# so JetPack's CUDA+GStreamer OpenCV is visible — do NOT pip install
+# opencv-python):
+#   source venv/bin/activate
+#   pip install -r jetson/requirements.txt
+#
+# TWO PACKAGES NEED JETSON-SPECIFIC WHEELS (PyPI's aarch64 builds are CPU-only
+# or missing) — see jetson/README.md "GPU wheels" for the exact commands:
+#   * onnxruntime-gpu  -> InsightFace on GPU (Jetson Zoo wheel)
+#   * torch            -> YOLO .pt fallback + TensorRT export (NVIDIA wheel)
+# ============================================================================
+
+paho-mqtt>=2.0
+pyyaml>=6.0
+numpy>=1.24.0
+cryptography>=41.0        # embeddings encrypted at rest
+insightface>=0.7.3        # RetinaFace + ArcFace (buffalo_l pack)
+onnxruntime-gpu; platform_machine != "aarch64"   # on Jetson: install Zoo wheel manually
+ultralytics>=8.1          # YOLO + TensorRT engine export

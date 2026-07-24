@@ -24,6 +24,10 @@ venv/
 
 # Data files
 data/face_encodings.pkl
+# Biometric data (face embeddings + encryption key) — NEVER commit
+data/faces/
+# Model weights / TensorRT engines (device-specific, large)
+models/
 data/known_faces/*
 !data/known_faces/.gitkeep
 data/recordings/*

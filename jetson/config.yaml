@@ -1,0 +1,71 @@
+# ============================================================================
+# ULTRON VISION — Jetson MQTT vision service configuration
+# ============================================================================
+
+camera:
+  # TP-Link Tapo C220/C225 — create a "Camera Account" in the Tapo app first
+  # (Camera Settings -> Advanced Settings -> Camera Account). Those credentials
+  # go here, NOT your TP-Link cloud login.
+  #   stream1 = 2K main stream, stream2 = 360p sub stream
+  rtsp_url: "rtsp://CAMERA_USER:CAMERA_PASS@192.168.1.60:554/stream1"
+  # Tapo main stream is H.264 by default; set "h265" if you switched the
+  # camera to H.265 in the Tapo app.
+  codec: "h264"
+  latency_ms: 200
+  reconnect_delay_seconds: 5.0
+
+mqtt:
+  # Broker runs on the Jetson itself (scripts/setup_mosquitto.sh)
+  host: "127.0.0.1"
+  port: 1883
+  # null -> auto-generated unique id: "ultron-vision-<hostname>-<rand>"
+  client_id: null
+  username: null
+  password: null
+
+face:
+  # InsightFace model pack (buffalo_l = RetinaFace det + ArcFace rec)
+  model_pack: "buffalo_l"
+  det_size: 640
+  min_face_size: 40            # px; ignore tiny faces (too far away to trust)
+  interval_seconds: 0.4        # how often the face pipeline runs on the latest frame
+  republish_seconds: 7.0       # contract: re-publish every ~5-10s while in frame
+  lost_after_seconds: 5.0      # no sighting for this long -> face_lost (once)
+  # Calibration: map ArcFace cosine similarity -> Mother confidence bands.
+  #   sim >= sim_at_conf_085  ->  confidence >= 0.85  (Mother states name plainly)
+  #   sim >= sim_at_conf_060  ->  0.60-0.85           ("name (uncertain)")
+  #   below                   ->  < 0.60              (sent as name "unknown")
+  sim_at_conf_060: 0.35
+  sim_at_conf_085: 0.55
+  # Embeddings live here, gitignored, encrypted at rest (biometric data).
+  store_dir: "data/faces"
+
+objects:
+  # TensorRT engine preferred. Build it once on the Jetson:
+  #   yolo export model=yolov8n.pt format=engine half=True
+  # Falls back to the .pt (PyTorch/CUDA) if the .engine is missing.
+  model: "models/yolov8n.engine"
+  fallback_model: "models/yolov8n.pt"
+  min_confidence: 0.5
+  interval_seconds: 1.0
+  republish_seconds: 60.0      # Mother staleness window is 300s; stay well inside it
+  prune_after_seconds: 10.0    # forget an unseen object so re-entry publishes fresh
+  # COCO labels to report; null = report everything YOLO sees.
+  labels:
+    - person
+    - laptop
+    - cell phone
+    - cup
+    - bottle
+    - book
+    - keyboard
+    - mouse
+    - tv
+    - backpack
+    - dog
+    - cat
+
+occupancy:
+  # person_count = sliding-window max of YOLO "person" detections.
+  # The window absorbs single missed frames so occupancy doesn't flap.
+  smoothing_seconds: 5.0

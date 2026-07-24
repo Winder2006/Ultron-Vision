@@ -374,7 +374,10 @@ class FaceRecognitionEngine:
         with self._lock:
             self._current_faces[frame.camera_id] = detections
 
-        if emit_event and detections:
+        # Emit even when empty: consumers rely on zero-face frames to clear
+        # state (UI overlays, activity person counts, recorder unknown-face
+        # tracking). Suppressing them left stale faces everywhere.
+        if emit_event:
             event = create_faces_event(
                 camera_id=frame.camera_id,
                 faces=detections,

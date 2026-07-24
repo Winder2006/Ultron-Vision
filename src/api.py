@@ -236,6 +236,8 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler"""
     # Startup
     logger.info("Starting ULTRON VISION API...")
+    # Route worker-thread publishes onto the server loop (see EventBus.publish_sync)
+    event_bus.set_main_loop(asyncio.get_running_loop())
     load_config()
     initialize_system()
     
@@ -385,12 +387,16 @@ async def stream_camera(websocket: WebSocket, camera_id: str):
         while True:
             try:
                 frame = camera.get_latest_frame()
-                
+
                 if frame and frame.frame_id != last_frame_id:
                     last_frame_id = frame.frame_id
-                    
-                    # Send as base64 encoded JSON
-                    jpeg = frame.to_jpeg(quality=70)
+
+                    # Shared per-frame cache: one encode regardless of client
+                    # count, and off the event loop so it can't stall other
+                    # websockets while encoding a 2K frame.
+                    jpeg = await asyncio.to_thread(camera.get_latest_jpeg, 70)
+                    if jpeg is None:
+                        continue
                     message = {
                         "type": "frame",
                         "timestamp": frame.timestamp.isoformat(),

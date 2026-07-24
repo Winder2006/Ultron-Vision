@@ -70,6 +70,9 @@ class ActivityDetector:
         
         # Alert cooldowns to prevent spam
         self._alert_cooldowns: Dict[str, datetime] = {}
+
+        # Monotonic id source for unknown-person tracks
+        self._unknown_seq = 0
         
         # Recent alerts for querying (bounded deque — no manual trimming needed)
         self._recent_alerts: deque = deque(maxlen=1000)
@@ -140,6 +143,27 @@ class ActivityDetector:
         cx2 = bbox2[0] + bbox2[2] / 2
         cy2 = bbox2[1] + bbox2[3] / 2
         return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+
+    def _match_unknown(
+        self,
+        tracked: Dict[str, PersonTracking],
+        bbox: List[int],
+        claimed: Set[str]
+    ) -> Optional[str]:
+        """Associate an unknown face with an existing unknown track by
+        proximity. Identity used to be the bbox size, which changes nearly
+        every frame — unknowns could never accumulate loitering time and
+        person counts churned."""
+        max_dist = max(80.0, 2.0 * max(bbox[2], bbox[3]))
+        best_id: Optional[str] = None
+        best_dist: Optional[float] = None
+        for pid, person in tracked.items():
+            if person.known or pid in claimed:
+                continue
+            dist = self._bbox_distance(bbox, person.bbox)
+            if dist <= max_dist and (best_dist is None or dist < best_dist):
+                best_id, best_dist = pid, dist
+        return best_id
     
     def _on_faces_detected(self, event: Event):
         """Handle face detection events"""
@@ -161,18 +185,32 @@ class ActivityDetector:
     def _process_faces(self, camera_id: str, faces: List[FaceDetection]):
         """Process detected faces for activity analysis"""
         now = datetime.now()
-        
+
+        # Alerts are collected here and emitted AFTER the lock is released:
+        # _emit_alert re-acquires self._lock (non-reentrant -> deadlock) and
+        # publishing to the event bus under a lock lets subscribers block us.
+        pending_alerts: List[ActivityAlert] = []
+
         with self._lock:
             tracked = self._tracked_people[camera_id]
             current_names: Set[str] = set()
             
+            claimed: Set[str] = set()
             for face in faces:
-                # Use name + bbox area as identifier for unknowns
                 if face.known:
                     person_id = face.name
                 else:
-                    person_id = f"unknown_{face.bbox[2]}x{face.bbox[3]}"
-                
+                    # Match to the nearest existing unknown track, or start a
+                    # new one. `claimed` stops two unknown faces in the same
+                    # frame from collapsing onto one track.
+                    matched = self._match_unknown(tracked, face.bbox, claimed)
+                    if matched is not None:
+                        person_id = matched
+                    else:
+                        self._unknown_seq += 1
+                        person_id = f"unknown_{self._unknown_seq}"
+
+                claimed.add(person_id)
                 current_names.add(person_id)
                 
                 if person_id in tracked:
@@ -197,7 +235,7 @@ class ActivityDetector:
                                     alert_key = f"loitering_{camera_id}_{person_id}"
                                     
                                     if self._can_alert(alert_key):
-                                        self._emit_alert(camera_id, ActivityAlert(
+                                        pending_alerts.append(ActivityAlert(
                                             alert_type="loitering",
                                             description=f"{'Unknown person' if not face.known else face.name} has been stationary for {int(stationary_seconds)} seconds",
                                             severity="medium",
@@ -225,7 +263,7 @@ class ActivityDetector:
                         alert_key = f"unknown_{camera_id}"
                         
                         if self._can_alert(alert_key):
-                            self._emit_alert(camera_id, ActivityAlert(
+                            pending_alerts.append(ActivityAlert(
                                 alert_type="unknown_person",
                                 description="Unknown person detected",
                                 severity="high",
@@ -249,7 +287,7 @@ class ActivityDetector:
                 alert_key = f"count_{camera_id}"
                 
                 if self._can_alert(alert_key):
-                    self._emit_alert(camera_id, ActivityAlert(
+                    pending_alerts.append(ActivityAlert(
                         alert_type="person_count_change",
                         description=f"Person count changed from {old_count} to {new_count} (someone {change_type})",
                         severity="low",
@@ -267,7 +305,10 @@ class ActivityDetector:
             ]
             for pid in expired:
                 del tracked[pid]
-    
+
+        for alert in pending_alerts:
+            self._emit_alert(camera_id, alert)
+
     def _on_motion_detected(self, event: Event):
         """Handle motion detection events"""
         camera_id = event.camera_id

@@ -290,11 +290,12 @@ type EventCallback = (event: WSEvent) => void;
 class WSClient {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
+  private maxReconnectDelay = 30000;
   private callbacks: EventCallback[] = [];
   private url: string;
   private isConnecting = false;
+  private closed = false;
 
   constructor(endpoint: string) {
     this.url = `${WS_BASE}${endpoint}`;
@@ -305,6 +306,7 @@ class WSClient {
       return;
     }
 
+    this.closed = false;
     this.isConnecting = true;
 
     try {
@@ -342,16 +344,19 @@ class WSClient {
   }
 
   private attemptReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnection attempts reached');
-      return;
-    }
+    // Retry forever (capped backoff). The backend can be down for a long time
+    // — e.g. the Jetson rebooting — and the UI must recover on its own without
+    // a page refresh. disconnect() sets `closed` to stop this loop.
+    if (this.closed) return;
 
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-    
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.maxReconnectDelay
+    );
+
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    
+
     setTimeout(() => this.connect(), delay);
   }
 
@@ -365,7 +370,12 @@ class WSClient {
   }
 
   disconnect(): void {
+    this.closed = true;
     if (this.ws) {
+      // Detach onclose first so closing doesn't schedule a reconnect.
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
       this.ws.close();
       this.ws = null;
     }
@@ -382,6 +392,7 @@ type FrameCallback = (frame: { data: string; timestamp: string; frame_id: number
 class StreamClient {
   private ws: WebSocket | null = null;
   private callback: FrameCallback | null = null;
+  private statusCallback: ((connected: boolean) => void) | null = null;
   private cameraId: string;
   private reconnectTimeout: number | null = null;
 
@@ -389,16 +400,24 @@ class StreamClient {
     this.cameraId = cameraId;
   }
 
-  connect(callback: FrameCallback): void {
+  connect(
+    callback: FrameCallback,
+    onStatus?: (connected: boolean) => void
+  ): void {
     this.callback = callback;
+    this.statusCallback = onStatus ?? null;
     this.createConnection();
   }
 
   private createConnection(): void {
     const url = `${WS_BASE}/stream/${this.cameraId}`;
-    
+
     try {
       this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        this.statusCallback?.(true);
+      };
 
       this.ws.onmessage = (event) => {
         try {
@@ -416,6 +435,8 @@ class StreamClient {
       };
 
       this.ws.onclose = () => {
+        // Tell the UI the feed dropped so it stops showing a frozen frame.
+        this.statusCallback?.(false);
         this.scheduleReconnect();
       };
 
@@ -424,6 +445,7 @@ class StreamClient {
       };
     } catch (e) {
       console.error('Failed to create stream WebSocket:', e);
+      this.statusCallback?.(false);
       this.scheduleReconnect();
     }
   }
@@ -446,10 +468,12 @@ class StreamClient {
     }
 
     this.callback = null;
+    this.statusCallback = null;
 
     if (this.ws) {
       // Detach handlers BEFORE closing so a close during the CONNECTING phase
       // doesn't fire onclose -> scheduleReconnect (orphaned reconnect loop).
+      this.ws.onopen = null;
       this.ws.onclose = null;
       this.ws.onerror = null;
       this.ws.onmessage = null;

@@ -132,10 +132,15 @@ export default function VideoCanvas({
       draw();
     };
 
-    streamClient.connect((frame) => {
-      setConnected(true);
-      img.src = `data:image/jpeg;base64,${frame.data}`;
-    });
+    streamClient.connect(
+      (frame) => {
+        setConnected(true);
+        img.src = `data:image/jpeg;base64,${frame.data}`;
+      },
+      // Feed dropped (Jetson reboot, network blip): flip back to the
+      // "Connecting..." overlay instead of leaving a stale frozen frame.
+      (isConnected) => setConnected(isConnected)
+    );
 
     // Redraw overlays on a light interval even between frames so boxes track.
     const overlayTimer = window.setInterval(draw, 200);

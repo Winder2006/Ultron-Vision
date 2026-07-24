@@ -4,6 +4,7 @@ Event Bus - Central event system for decoupling detection modules from API/UI
 
 import asyncio
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -134,9 +135,19 @@ class EventBus:
         self._all_subscribers: List[Callable] = []
         self._event_history: List[Event] = []
         self._max_history = 1000
-        self._lock = asyncio.Lock()
+        # threading.Lock, NOT asyncio.Lock: publish() runs from multiple
+        # threads/loops, and an asyncio.Lock binds to the first loop that
+        # acquires it, permanently breaking every other caller.
+        self._lock = threading.Lock()
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._pending_tasks: set = set()
         self._initialized = True
         logger.info("EventBus initialized")
+
+    def set_main_loop(self, loop: asyncio.AbstractEventLoop):
+        """Register the server's event loop. Worker threads publish onto this
+        loop so all subscribers run in one place."""
+        self._main_loop = loop
     
     def subscribe(self, event_type: EventType, callback: Callable):
         """Subscribe to a specific event type"""
@@ -164,14 +175,15 @@ class EventBus:
     
     async def publish(self, event: Event):
         """Publish an event to all subscribers"""
-        async with self._lock:
+        with self._lock:
             # Store in history
             self._event_history.append(event)
             if len(self._event_history) > self._max_history:
                 self._event_history = self._event_history[-self._max_history:]
-        
-        # Notify specific subscribers
-        for callback in self._subscribers[event.type]:
+
+        # Iterate over copies: subscribers can (un)subscribe while we await
+        # (e.g. an /events WebSocket client disconnecting mid-publish).
+        for callback in list(self._subscribers[event.type]):
             try:
                 if asyncio.iscoroutinefunction(callback):
                     await callback(event)
@@ -179,9 +191,9 @@ class EventBus:
                     callback(event)
             except Exception as e:
                 logger.error(f"Error in event subscriber: {e}")
-        
+
         # Notify all-event subscribers
-        for callback in self._all_subscribers:
+        for callback in list(self._all_subscribers):
             try:
                 if asyncio.iscoroutinefunction(callback):
                     await callback(event)
@@ -189,14 +201,30 @@ class EventBus:
                     callback(event)
             except Exception as e:
                 logger.error(f"Error in all-event subscriber: {e}")
-    
+
     def publish_sync(self, event: Event):
-        """Synchronous publish for use in non-async contexts"""
+        """Publish from sync code, on or off the event loop thread.
+
+        Detection runs in a worker thread; publishes are routed onto the
+        server's loop instead of spinning up a throwaway loop per event
+        (which used to bind this bus to one loop and silently kill every
+        publish from the other side).
+        """
         try:
             loop = asyncio.get_running_loop()
-            asyncio.create_task(self.publish(event))
         except RuntimeError:
-            # No event loop running, create one
+            loop = None
+
+        if loop is not None:
+            # Already on a loop thread: schedule, keeping a strong reference
+            # so the task isn't garbage-collected mid-flight.
+            task = loop.create_task(self.publish(event))
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+        elif self._main_loop is not None and self._main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.publish(event), self._main_loop)
+        else:
+            # No server loop (tests, CLI tools): run to completion inline.
             asyncio.run(self.publish(event))
     
     def get_recent_events(

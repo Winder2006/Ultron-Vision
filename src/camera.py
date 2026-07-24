@@ -96,7 +96,9 @@ class CameraStream:
         self._cap: Optional[cv2.VideoCapture] = None
         self._frame_queue: Queue[Frame] = Queue(maxsize=frame_queue_size)
         self._latest_frame: Optional[Frame] = None
-        self._latest_jpeg: Optional[bytes] = None
+        # Lazy JPEG cache: quality -> (frame_id, bytes). Encoding happens on
+        # the first consumer request per frame, never in the capture thread.
+        self._jpeg_cache: Dict[int, Tuple[int, bytes]] = {}
         self._frame_lock = threading.Lock()
         
         self._running = False
@@ -170,10 +172,25 @@ class CameraStream:
         with self._frame_lock:
             return self._latest_frame
     
-    def get_latest_jpeg(self) -> Optional[bytes]:
-        """Get the most recent frame as JPEG bytes"""
+    def get_latest_jpeg(self, quality: int = 80) -> Optional[bytes]:
+        """Get the most recent frame as JPEG bytes.
+
+        Encoded lazily and cached per (frame, quality), so N stream clients
+        cost one encode per frame and an unwatched camera costs zero.
+        """
         with self._frame_lock:
-            return self._latest_jpeg
+            frame = self._latest_frame
+            if frame is None:
+                return None
+            cached = self._jpeg_cache.get(quality)
+            if cached is not None and cached[0] == frame.frame_id:
+                return cached[1]
+        # Encode outside the lock — never block the capture thread on this.
+        jpeg = frame.to_jpeg(quality=quality)
+        with self._frame_lock:
+            if self._latest_frame is frame:
+                self._jpeg_cache[quality] = (frame.frame_id, jpeg)
+        return jpeg
     
     def get_status(self) -> CameraStatus:
         """Get current camera status"""
@@ -283,10 +300,10 @@ class CameraStream:
                     height=image.shape[0]
                 )
                 
-                # Update latest frame
+                # Update latest frame (JPEG encoding is deferred to
+                # get_latest_jpeg — keep the capture loop lean)
                 with self._frame_lock:
                     self._latest_frame = frame
-                    self._latest_jpeg = frame.to_jpeg()
                 
                 # Add to queue (non-blocking, drop old frames if full)
                 try:

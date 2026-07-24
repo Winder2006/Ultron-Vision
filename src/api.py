@@ -209,10 +209,11 @@ def process_frame(frame):
 import os as _os
 
 # Rate-limit detection so it can't saturate the GIL and starve the capture
-# thread / event loop. cnn (GPU) is fast enough to otherwise run flat-out;
+# thread / event loop. GPU models are fast enough to otherwise run flat-out;
 # without a cap the worker + 2K motion detection pegged Python and dropped
-# capture fps to ~0 and timed out the API. ~4 fps is plenty for overlay boxes.
-DETECT_INTERVAL = float(_os.environ.get("DETECT_INTERVAL", "0.25"))
+# capture fps to ~0 and timed out the API. InsightFace is ~25ms/frame, so
+# 10 Hz costs ~25% of one core and keeps overlay boxes tight.
+DETECT_INTERVAL = float(_os.environ.get("DETECT_INTERVAL", "0.10"))
 
 
 def _detection_worker():

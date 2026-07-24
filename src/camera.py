@@ -7,13 +7,13 @@ import sys
 
 # Force FFMPEG to use TCP for RTSP (far more reliable than default UDP on
 # Reolink/IP cams) and fail fast instead of hanging forever on a dead stream.
-# The low-latency flags (nobuffer / low_delay / no reorder queue) minimize the
-# demuxer's input buffering so detection runs on near-current frames — the
-# capture buffer was the dominant lag behind the live WebRTC view.
+# NOTE: low-latency flags (nobuffer/low_delay/reorder_queue_size;0) were tried
+# to cut capture lag but broke H.264 reordering on the Tapo stream (fps -> ~0),
+# so we keep plain buffered TCP.
 # Must be set before the first cv2.VideoCapture() call.
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|reorder_queue_size;0|stimeout;5000000"
+    "rtsp_transport;tcp|stimeout;5000000"
 )
 
 import cv2

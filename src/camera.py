@@ -34,6 +34,34 @@ logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform.startswith("win")
 
+# GStreamer rtspsrc jitter buffer (ms). Lower = more real-time, less tolerant
+# of network jitter; drop-on-latency drops late frames instead of queueing.
+RTSP_LATENCY_MS = 100
+# A GStreamer capture that wedges on open/preroll must not block the capture
+# thread forever — abandon it after this and fall through to the next backend.
+RTSP_OPEN_TIMEOUT_S = 20.0
+
+
+def nvdec_rtsp_pipeline(url: str, codec: str = "h264", latency_ms: int = RTSP_LATENCY_MS) -> str:
+    """GStreamer pipeline decoding RTSP on the Jetson's NVDEC (nvv4l2decoder),
+    so a 2K H.264 stream isn't software-decoded on the CPU."""
+    depay = "rtph265depay ! h265parse" if codec == "h265" else "rtph264depay ! h264parse"
+    return (
+        'rtspsrc location="{url}" protocols=tcp latency={lat} drop-on-latency=true ! '
+        "{depay} ! nvv4l2decoder ! "
+        "nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! "
+        "appsink drop=true max-buffers=1 sync=false"
+    ).format(url=url, lat=latency_ms, depay=depay)
+
+
+def software_rtsp_pipeline(url: str, latency_ms: int = RTSP_LATENCY_MS) -> str:
+    """Software-GStreamer fallback (decodebin auto-plugs a decoder)."""
+    return (
+        'rtspsrc location="{url}" protocols=tcp latency={lat} drop-on-latency=true ! '
+        "decodebin ! videoconvert ! video/x-raw,format=BGR ! "
+        "appsink drop=true max-buffers=1 sync=false"
+    ).format(url=url, lat=latency_ms)
+
 
 @dataclass
 class CameraConfig:
@@ -42,6 +70,7 @@ class CameraConfig:
     rtsp_url: str
     ptz_enabled: bool = False
     api_url: Optional[str] = None
+    codec: str = "h264"  # RTSP codec for the NVDEC pipeline ("h264" or "h265")
     
     @property
     def is_webcam(self) -> bool:
@@ -104,6 +133,7 @@ class CameraStream:
         
         self._running = False
         self._connected = False
+        self._backend = "none"  # active decode path (nvdec/software/ffmpeg/webcam)
         self._capture_thread: Optional[threading.Thread] = None
         self._frame_id = 0
         
@@ -222,53 +252,123 @@ class CameraStream:
     def _connect(self) -> bool:
         """Connect to the RTSP stream or webcam"""
         try:
-            if self.config.is_webcam:
-                # Connect to local webcam
-                webcam_idx = self.config.webcam_index
-                logger.info(f"Connecting to webcam {webcam_idx} for camera {self.config.id}")
-                # CAP_DSHOW is Windows-only; on Linux/Jetson use V4L2.
-                if IS_WINDOWS:
-                    self._cap = cv2.VideoCapture(webcam_idx, cv2.CAP_DSHOW)
-                else:
-                    self._cap = cv2.VideoCapture(webcam_idx, cv2.CAP_V4L2)
+            if not self.config.is_webcam:
+                return self._connect_rtsp()
 
-                # Set webcam properties
-                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                self._cap.set(cv2.CAP_PROP_FPS, 30)
+            # Connect to local webcam
+            webcam_idx = self.config.webcam_index
+            logger.info(f"Connecting to webcam {webcam_idx} for camera {self.config.id}")
+            # CAP_DSHOW is Windows-only; on Linux/Jetson use V4L2.
+            if IS_WINDOWS:
+                self._cap = cv2.VideoCapture(webcam_idx, cv2.CAP_DSHOW)
             else:
-                # Connect to RTSP stream via FFMPEG (TCP transport set above)
-                logger.info(f"Connecting to camera {self.config.id}: {self.config.rtsp_url}")
-                self._cap = cv2.VideoCapture(self.config.rtsp_url, cv2.CAP_FFMPEG)
-                # Fail fast on a dead stream instead of blocking the thread forever.
-                try:
-                    self._cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
-                    self._cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000)
-                except AttributeError:
-                    pass  # Older OpenCV builds lack these props
+                self._cap = cv2.VideoCapture(webcam_idx, cv2.CAP_V4L2)
 
-            # Set buffer size to minimize latency
+            # Set webcam properties
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            self._cap.set(cv2.CAP_PROP_FPS, 30)
             self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
+
             if self._cap.isOpened():
-                # Read a test frame
                 ret, _ = self._cap.read()
                 if ret:
                     self._connected = True
-                    source = "webcam" if self.config.is_webcam else "RTSP"
-                    logger.info(f"Camera {self.config.id} connected successfully ({source})")
+                    self._backend = "webcam"
+                    logger.info(f"Camera {self.config.id} connected successfully (webcam)")
                     self._publish_status()
                     return True
-            
+
             logger.error(f"Failed to connect to camera {self.config.id}")
             self._disconnect()
             return False
-            
+
         except Exception as e:
             logger.error(f"Error connecting to camera {self.config.id}: {e}")
             self._disconnect()
             return False
-    
+
+    def _open_capture_guarded(self, source, api, label: str):
+        """Open a VideoCapture and read one test frame, but abandon the attempt
+        after RTSP_OPEN_TIMEOUT_S. A GStreamer/NVDEC pipeline can wedge on
+        open/preroll with no internal timeout, which previously blocked the
+        capture thread forever; the watchdog lets us fall through to the next
+        backend instead. Returns the opened cap, or None.
+        """
+        holder = {}
+
+        def _open():
+            try:
+                cap = cv2.VideoCapture(source, api)
+                if api == cv2.CAP_FFMPEG:
+                    try:
+                        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
+                        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000)
+                    except AttributeError:
+                        pass
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if cap.isOpened():
+                    ok, _ = cap.read()
+                    if ok:
+                        holder["cap"] = cap
+                        return
+                cap.release()
+            except Exception as e:
+                logger.debug(f"{label} open error for {self.config.id}: {e}")
+
+        th = threading.Thread(target=_open, name=f"open-{self.config.id}", daemon=True)
+        th.start()
+        th.join(RTSP_OPEN_TIMEOUT_S)
+        if "cap" in holder:
+            return holder["cap"]
+        if th.is_alive():
+            logger.warning(
+                f"{label} open timed out (>{RTSP_OPEN_TIMEOUT_S}s) for "
+                f"{self.config.id} — abandoning, trying next backend"
+            )
+        return None
+
+    def _connect_rtsp(self) -> bool:
+        """Open an RTSP stream, preferring Jetson hardware decode.
+
+        Tries, in order: NVDEC via GStreamer (nvv4l2decoder) -> software
+        GStreamer -> FFMPEG. Hardware decode cuts latency and CPU vs
+        software-decoding 2K H.264. Each attempt is guarded by a watchdog so a
+        wedged pipeline can't block the capture thread — it just falls through
+        to the next (the FFMPEG path is the proven fallback).
+        """
+        url = self.config.rtsp_url
+        codec = getattr(self.config, "codec", "h264") or "h264"
+
+        attempts = []
+        # GStreamer is a JetPack/Linux OpenCV feature; on Windows (webcam dev,
+        # pip OpenCV has no GStreamer) go straight to FFMPEG.
+        if not IS_WINDOWS:
+            attempts.append((nvdec_rtsp_pipeline(url, codec), cv2.CAP_GSTREAMER, "gstreamer-nvdec"))
+            attempts.append((software_rtsp_pipeline(url), cv2.CAP_GSTREAMER, "gstreamer-software"))
+        attempts.append((url, cv2.CAP_FFMPEG, "ffmpeg"))
+
+        for source, api, label in attempts:
+            logger.info(f"Connecting to camera {self.config.id} via {label}")
+            cap = self._open_capture_guarded(source, api, label)
+            if cap is not None:
+                self._cap = cap
+                self._backend = label
+                self._connected = True
+                logger.info(f"Camera {self.config.id} connected via {label}")
+                if label != "gstreamer-nvdec":
+                    logger.warning(
+                        f"Camera {self.config.id} is NOT using NVDEC hardware "
+                        f"decode ({label}) — the stream is decoded on the CPU."
+                    )
+                self._publish_status()
+                return True
+
+        logger.error(f"Failed to connect to camera {self.config.id} (all backends)")
+        self._disconnect()
+        return False
+
+
     def _disconnect(self):
         """Disconnect from the RTSP stream"""
         if self._cap:
@@ -277,7 +377,8 @@ class CameraStream:
         
         was_connected = self._connected
         self._connected = False
-        
+        self._backend = "none"
+
         if was_connected:
             logger.info(f"Camera {self.config.id} disconnected")
             self._publish_status()

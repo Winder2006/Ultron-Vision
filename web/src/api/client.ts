@@ -3,8 +3,14 @@
  * Typed HTTP + WebSocket client for FastAPI endpoints
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8200';
-const WS_BASE = API_BASE.replace('http', 'ws');
+// Default to the origin that served the page, so a build served BY the backend
+// (Jetson at :8200, or a tunnel like https://ultron.example.com) just works —
+// LAN or remote — with no rebuild. VITE_API_BASE_URL overrides it, which the
+// laptop dev server uses (via web/.env.local) to point at the Jetson.
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8200');
+const WS_BASE = API_BASE.replace(/^http/, 'ws');
 
 // Types
 export interface Camera {

@@ -415,8 +415,13 @@ async def stream_camera(websocket: WebSocket, camera_id: str):
                     }
                     
                     await websocket.send_json(message)
-                
-                await asyncio.sleep(0.066)  # ~15 FPS
+
+                # Poll for the next frame quickly. A fixed 66ms sleep here was
+                # ADDITIVE with encode+send time, capping delivery near ~9 FPS
+                # regardless of capture rate. We only encode when frame_id
+                # changes, so idle polls are cheap; delivery now tracks the
+                # camera (~15 FPS).
+                await asyncio.sleep(0.01)
             except Exception as e:
                 logger.debug(f"Stream frame error: {e}")
                 break

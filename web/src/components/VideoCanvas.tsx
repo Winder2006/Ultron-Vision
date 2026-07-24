@@ -23,7 +23,6 @@ interface VideoCanvasProps {
   cameraId: string;
   faces: Face[];
   tracking?: TrackingStatus;
-  motionRegions?: Array<{ bbox: [number, number, number, number] }>;
   showOverlays?: boolean;
 }
 
@@ -31,7 +30,6 @@ export default function VideoCanvas({
   cameraId,
   faces,
   tracking,
-  motionRegions = [],
   showOverlays = true,
 }: VideoCanvasProps) {
   const videoHostRef = useRef<HTMLDivElement>(null);
@@ -41,11 +39,9 @@ export default function VideoCanvas({
   // Latest overlay data in refs so the draw loop reads current values.
   const facesRef = useRef(faces);
   const trackingRef = useRef(tracking);
-  const motionRef = useRef(motionRegions);
   const showRef = useRef(showOverlays);
   facesRef.current = faces;
   trackingRef.current = tracking;
-  motionRef.current = motionRegions;
   showRef.current = showOverlays;
 
   useEffect(() => {
@@ -99,16 +95,6 @@ export default function VideoCanvas({
       const offY = (canvas.height - dispH) / 2;
       const mapX = (x: number) => offX + x * scale;
       const mapY = (y: number) => offY + y * scale;
-
-      // Motion regions
-      motionRef.current.forEach((region) => {
-        const [x, y, rw, rh] = region.bbox;
-        ctx.strokeStyle = 'rgba(255, 136, 0, 0.5)';
-        ctx.fillStyle = 'rgba(255, 136, 0, 0.1)';
-        ctx.lineWidth = 1;
-        ctx.fillRect(mapX(x), mapY(y), rw * scale, rh * scale);
-        ctx.strokeRect(mapX(x), mapY(y), rw * scale, rh * scale);
-      });
 
       // Face boxes — known = orange, unknown = red
       facesRef.current.forEach((face) => {

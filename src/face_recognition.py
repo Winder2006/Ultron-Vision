@@ -30,10 +30,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FaceRecognitionConfig:
-    model: str = "hog"  # "hog" for CPU, "cnn" for GPU
+    model: str = "hog"  # "hog" (CPU dlib), "cnn" (GPU dlib), "insightface" (GPU onnxruntime)
     tolerance: float = 0.6
     min_face_size: int = 50
     encodings_path: str = "data/face_encodings.pkl"
+    # insightface: ArcFace cosine similarity -> confidence anchors
+    # (sim 0.35 -> conf 0.60, sim 0.55 -> conf 0.85; known iff conf >= 0.60)
+    insightface_pack: str = "buffalo_l"
+    insightface_det_size: int = 640
 
 
 @dataclass
@@ -67,7 +71,8 @@ class FaceRecognitionEngine:
         self._known_names: List[str] = []
         self._lock = threading.Lock()
         self._current_faces: Dict[str, List[FaceDetection]] = {}  # camera_id -> faces
-        
+        self._insight_app = None
+
         self._initialized = True
         logger.info(f"FaceRecognitionEngine initialized with model: {self.config.model}")
     
@@ -76,6 +81,71 @@ class FaceRecognitionEngine:
         self.config = config
         logger.info(f"FaceRecognitionEngine configured: model={config.model}, tolerance={config.tolerance}")
     
+    def _get_insightface(self):
+        """Lazy-init InsightFace (RetinaFace det + ArcFace rec) on the GPU."""
+        if self._insight_app is None:
+            from insightface.app import FaceAnalysis  # heavy import, keep lazy
+
+            app = FaceAnalysis(
+                name=self.config.insightface_pack,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+            size = self.config.insightface_det_size
+            app.prepare(ctx_id=0, det_size=(size, size))
+            provider = app.models["recognition"].session.get_providers()[0]
+            if provider != "CUDAExecutionProvider":
+                logger.warning(
+                    "InsightFace running on %s — install the Jetson "
+                    "onnxruntime-gpu wheel for GPU inference", provider
+                )
+            logger.info(
+                f"InsightFace ready (pack={self.config.insightface_pack}, "
+                f"det={size}, provider={provider})"
+            )
+            self._insight_app = app
+        return self._insight_app
+
+    @staticmethod
+    def _calibrate_sim(sim: float) -> float:
+        """ArcFace cosine similarity -> confidence (0.35->0.60, 0.55->0.85)."""
+        conf = 0.60 + (sim - 0.35) * (0.85 - 0.60) / (0.55 - 0.35)
+        return max(0.0, min(0.99, conf))
+
+    def _best_embedding_match(self, embedding: np.ndarray):
+        """Best cosine match among enrolled ArcFace embeddings (skips any
+        legacy dlib 128-d encodings that may share the pickle)."""
+        best_name, best_sim = None, -1.0
+        for enc, name in zip(self._known_encodings, self._known_names):
+            if enc.shape != embedding.shape:
+                continue
+            sim = float(np.dot(enc, embedding))
+            if sim > best_sim:
+                best_name, best_sim = name, sim
+        return best_name, best_sim
+
+    def _recognize_insightface(self, image: np.ndarray) -> List[FaceDetection]:
+        """Detect + recognize via InsightFace. Bboxes are full-res (the model
+        letterboxes to det_size internally and maps coords back)."""
+        detections: List[FaceDetection] = []
+        for face in self._get_insightface().get(image):
+            x1, y1, x2, y2 = [int(v) for v in face.bbox]
+            w, h = x2 - x1, y2 - y1
+            if min(w, h) < self.config.min_face_size:
+                continue
+            name, sim = self._best_embedding_match(face.normed_embedding)
+            conf = self._calibrate_sim(sim)
+            if name is not None and conf >= 0.60:
+                detections.append(FaceDetection(
+                    name=name, confidence=round(conf, 2),
+                    bbox=[x1, y1, w, h], known=True
+                ))
+            else:
+                detections.append(FaceDetection(
+                    name="Unknown", confidence=0.0,
+                    bbox=[x1, y1, w, h], known=False
+                ))
+        return detections
+
     def load_encodings(self, path: Optional[str] = None):
         """Load face encodings from file"""
         path = path or self.config.encodings_path
@@ -134,35 +204,48 @@ class FaceRecognitionEngine:
         """
         with self._lock:
             try:
-                # Convert BGR to RGB for face_recognition
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                
-                # Detect faces
-                face_locations = fr.face_locations(
-                    rgb_image,
-                    model=self.config.model
-                )
-                
-                if not face_locations:
-                    logger.warning(f"No face found in image for {name}")
-                    return False
-                
-                if len(face_locations) > 1:
-                    logger.warning(f"Multiple faces found, using largest for {name}")
-                    # Use largest face
-                    face_locations = [max(
-                        face_locations,
-                        key=lambda loc: (loc[2] - loc[0]) * (loc[1] - loc[3])
-                    )]
-                
-                # Generate encoding
-                encodings = fr.face_encodings(rgb_image, face_locations)
-                
-                if not encodings:
-                    logger.warning(f"Could not generate encoding for {name}")
-                    return False
-                
-                encoding = encodings[0]
+                if self.config.model == "insightface":
+                    faces = self._get_insightface().get(image)
+                    if not faces:
+                        logger.warning(f"No face found in image for {name}")
+                        return False
+                    if len(faces) > 1:
+                        logger.warning(f"Multiple faces found, using largest for {name}")
+                    face = max(
+                        faces,
+                        key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                    )
+                    encoding = face.normed_embedding.copy()
+                else:
+                    # Convert BGR to RGB for face_recognition
+                    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+                    # Detect faces
+                    face_locations = fr.face_locations(
+                        rgb_image,
+                        model=self.config.model
+                    )
+
+                    if not face_locations:
+                        logger.warning(f"No face found in image for {name}")
+                        return False
+
+                    if len(face_locations) > 1:
+                        logger.warning(f"Multiple faces found, using largest for {name}")
+                        # Use largest face
+                        face_locations = [max(
+                            face_locations,
+                            key=lambda loc: (loc[2] - loc[0]) * (loc[1] - loc[3])
+                        )]
+
+                    # Generate encoding
+                    encodings = fr.face_encodings(rgb_image, face_locations)
+
+                    if not encodings:
+                        logger.warning(f"Could not generate encoding for {name}")
+                        return False
+
+                    encoding = encodings[0]
                 
                 # Add to known faces
                 if name in self._known_faces:
@@ -311,6 +394,10 @@ class FaceRecognitionEngine:
         Detect and recognize faces in image.
         Returns list of FaceDetection objects.
         """
+        if self.config.model == "insightface":
+            # InsightFace resizes internally (det_size); scale is ignored.
+            return self._recognize_insightface(image)
+
         faces = self.detect_faces(image, scale)
         detections: List[FaceDetection] = []
         
@@ -318,16 +405,25 @@ class FaceRecognitionEngine:
             top, right, bottom, left = location
             bbox = [left, top, right - left, bottom - top]
             
-            if len(self._known_encodings) > 0 and encoding is not None:
+            # Only compare against same-dimension (dlib 128-d) encodings —
+            # ArcFace 512-d embeddings may share the pickle after a model switch.
+            known = [
+                (enc, nm) for enc, nm in
+                zip(self._known_encodings, self._known_names)
+                if encoding is not None and enc.shape == encoding.shape
+            ]
+            if known:
+                known_encs = [enc for enc, _ in known]
+                known_names = [nm for _, nm in known]
                 # Compare against known faces
-                distances = fr.face_distance(self._known_encodings, encoding)
+                distances = fr.face_distance(known_encs, encoding)
                 
                 if len(distances) > 0:
                     min_idx = np.argmin(distances)
                     min_distance = distances[min_idx]
                     
                     if min_distance <= self.config.tolerance:
-                        name = self._known_names[min_idx]
+                        name = known_names[min_idx]
                         confidence = 1.0 - min_distance
                         detections.append(FaceDetection(
                             name=name,

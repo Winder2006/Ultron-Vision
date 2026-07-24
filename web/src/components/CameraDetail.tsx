@@ -130,7 +130,6 @@ export default function CameraDetail({
             cameraId={camera.id}
             faces={faces}
             tracking={tracking}
-            motionRegions={motionStatus?.regions}
           />
           
           {/* Overlay info */}

@@ -1,5 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
-import { createStreamClient, Face, TrackingStatus } from '../api/client';
+import { Face, TrackingStatus } from '../api/client';
+// Vendored go2rtc WebRTC client (no type declarations).
+// @ts-ignore
+import { VideoRTC } from '../lib/video-rtc.js';
+
+// Register the go2rtc custom element once.
+if (typeof window !== 'undefined' && !customElements.get('video-stream')) {
+  customElements.define('video-stream', VideoRTC);
+}
+
+// go2rtc runs on the same host that served the UI, port 1984. VITE_GO2RTC_BASE
+// (e.g. "http://192.168.1.202:1984") overrides it for the laptop dev server.
+function go2rtcWsUrl(cameraId: string): string {
+  const base = import.meta.env.VITE_GO2RTC_BASE as string | undefined;
+  const src = encodeURIComponent(cameraId);
+  if (base) return `${base.replace(/^http/, 'ws')}/api/ws?src=${src}`;
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${window.location.hostname}:1984/api/ws?src=${src}`;
+}
 
 interface VideoCanvasProps {
   cameraId: string;
@@ -16,11 +34,11 @@ export default function VideoCanvas({
   motionRegions = [],
   showOverlays = true,
 }: VideoCanvasProps) {
+  const videoHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [connected, setConnected] = useState(false);
 
-  // Keep latest overlay data in refs so the draw loop (set up once per camera)
-  // always reads current values without re-subscribing the stream.
+  // Latest overlay data in refs so the draw loop reads current values.
   const facesRef = useRef(faces);
   const trackingRef = useRef(tracking);
   const motionRef = useRef(motionRegions);
@@ -31,11 +49,28 @@ export default function VideoCanvas({
   showRef.current = showOverlays;
 
   useEffect(() => {
-    const streamClient = createStreamClient(cameraId);
-    const img = new Image();
-    // Frame-space dimensions (the source JPEG size) for scaling overlays.
-    let frameW = 640;
-    let frameH = 360;
+    const host = videoHostRef.current;
+    if (!host) return;
+
+    // Mount the go2rtc WebRTC <video-stream>. Appending triggers connect;
+    // then setting .src starts negotiation.
+    const el: any = document.createElement('video-stream');
+    el.style.width = '100%';
+    el.style.height = '100%';
+    host.appendChild(el);
+    el.mode = 'webrtc'; // force the low-latency path
+    el.src = go2rtcWsUrl(cameraId);
+
+    const video: HTMLVideoElement | undefined = el.video;
+    if (video) {
+      video.controls = false;
+      video.muted = true;
+      video.playsInline = true;
+      video.style.objectFit = 'contain';
+      video.addEventListener('playing', () => setConnected(true));
+      video.addEventListener('waiting', () => setConnected(false));
+      video.addEventListener('emptied', () => setConnected(false));
+    }
 
     const draw = () => {
       const canvas = canvasRef.current;
@@ -43,24 +78,27 @@ export default function VideoCanvas({
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // Match the drawing buffer to the displayed size.
       const rect = canvas.getBoundingClientRect();
-      const w = Math.round(rect.width);
-      const h = Math.round(rect.height);
-      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
-        canvas.width = w;
-        canvas.height = h;
+      const cw = Math.round(rect.width);
+      const ch = Math.round(rect.height);
+      if (cw > 0 && ch > 0 && (canvas.width !== cw || canvas.height !== ch)) {
+        canvas.width = cw;
+        canvas.height = ch;
       }
-
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (img.complete && img.naturalWidth > 0) {
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      }
-
       if (!showRef.current) return;
 
-      const scaleX = canvas.width / frameW;
-      const scaleY = canvas.height / frameH;
+      // Map full-res detection coords -> the video's on-screen rect. The
+      // video is object-fit:contain, so it's letterboxed; account for that.
+      const vw = (video && video.videoWidth) || 2560;
+      const vh = (video && video.videoHeight) || 1440;
+      const scale = Math.min(canvas.width / vw, canvas.height / vh);
+      const dispW = vw * scale;
+      const dispH = vh * scale;
+      const offX = (canvas.width - dispW) / 2;
+      const offY = (canvas.height - dispH) / 2;
+      const mapX = (x: number) => offX + x * scale;
+      const mapY = (y: number) => offY + y * scale;
 
       // Motion regions
       motionRef.current.forEach((region) => {
@@ -68,17 +106,17 @@ export default function VideoCanvas({
         ctx.strokeStyle = 'rgba(255, 136, 0, 0.5)';
         ctx.fillStyle = 'rgba(255, 136, 0, 0.1)';
         ctx.lineWidth = 1;
-        ctx.fillRect(x * scaleX, y * scaleY, rw * scaleX, rh * scaleY);
-        ctx.strokeRect(x * scaleX, y * scaleY, rw * scaleX, rh * scaleY);
+        ctx.fillRect(mapX(x), mapY(y), rw * scale, rh * scale);
+        ctx.strokeRect(mapX(x), mapY(y), rw * scale, rh * scale);
       });
 
-      // Face boxes — known = orange, unknown = red (Ultron palette)
+      // Face boxes — known = orange, unknown = red
       facesRef.current.forEach((face) => {
         const [x, y, fw, fh] = face.bbox;
-        const sx = x * scaleX;
-        const sy = y * scaleY;
-        const sw = fw * scaleX;
-        const sh = fh * scaleY;
+        const sx = mapX(x);
+        const sy = mapY(y);
+        const sw = fw * scale;
+        const sh = fh * scale;
 
         const color = face.known ? '#ff6600' : '#ff0000';
         ctx.strokeStyle = color;
@@ -103,8 +141,8 @@ export default function VideoCanvas({
       const trk = trackingRef.current;
       if (trk?.active && trk.bbox) {
         const [x, y, tw, th] = trk.bbox;
-        const cx = (x + tw / 2) * scaleX;
-        const cy = (y + th / 2) * scaleY;
+        const cx = mapX(x + tw / 2);
+        const cy = mapY(y + th / 2);
         const size = 30;
         ctx.strokeStyle = '#e63333';
         ctx.lineWidth = 2;
@@ -126,49 +164,31 @@ export default function VideoCanvas({
       }
     };
 
-    // Overlays are in full-res capture coordinates; the preview JPEG is
-    // downscaled. Prefer the original dims the stream reports; fall back to
-    // the decoded image size only if they're absent.
-    let haveDims = false;
-
-    img.onload = () => {
-      if (!haveDims) {
-        frameW = img.naturalWidth || frameW;
-        frameH = img.naturalHeight || frameH;
-      }
-      draw();
-    };
-
-    streamClient.connect(
-      (frame) => {
-        setConnected(true);
-        if (frame.frame_w && frame.frame_h) {
-          frameW = frame.frame_w;
-          frameH = frame.frame_h;
-          haveDims = true;
-        }
-        img.src = `data:image/jpeg;base64,${frame.data}`;
-      },
-      // Feed dropped (Jetson reboot, network blip): flip back to the
-      // "Connecting..." overlay instead of leaving a stale frozen frame.
-      (isConnected) => setConnected(isConnected)
-    );
-
-    // Redraw overlays on a light interval even between frames so boxes track.
-    const overlayTimer = window.setInterval(draw, 200);
+    const overlayTimer = window.setInterval(draw, 150);
 
     return () => {
       window.clearInterval(overlayTimer);
-      streamClient.disconnect();
+      // Removing the element fires disconnectedCallback -> closes WebRTC.
+      try {
+        host.removeChild(el);
+      } catch {
+        /* already gone */
+      }
+      setConnected(false);
     };
   }, [cameraId]);
 
   return (
     <div className="relative w-full h-full bg-black">
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+      {/* WebRTC video mounts here (React leaves this div's children alone) */}
+      <div ref={videoHostRef} className="absolute inset-0" />
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full z-10 pointer-events-none"
+      />
 
       {!connected && (
-        <div className="absolute inset-0 flex items-center justify-center bg-terminal-surface/80">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-terminal-surface/80">
           <div className="text-center">
             <div className="w-8 h-8 border-2 border-terminal-accent border-t-transparent rounded-full animate-spin mx-auto mb-2" />
             <span className="text-terminal-muted text-sm">Connecting...</span>

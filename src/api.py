@@ -206,11 +206,27 @@ def process_frame(frame):
     _proc_event.set()
 
 
+import os as _os
+
+# Rate-limit detection so it can't saturate the GIL and starve the capture
+# thread / event loop. cnn (GPU) is fast enough to otherwise run flat-out;
+# without a cap the worker + 2K motion detection pegged Python and dropped
+# capture fps to ~0 and timed out the API. ~4 fps is plenty for overlay boxes.
+DETECT_INTERVAL = float(_os.environ.get("DETECT_INTERVAL", "0.25"))
+
+
 def _detection_worker():
-    """Runs face recognition + motion detection off the capture thread."""
+    """Runs face recognition + motion detection off the capture thread,
+    rate-limited (see DETECT_INTERVAL)."""
+    last = 0.0
     while _proc_running:
         _proc_event.wait(timeout=1.0)
         _proc_event.clear()
+        # Throttle: leave GIL headroom for capture + the event loop.
+        dt = time.monotonic() - last
+        if dt < DETECT_INTERVAL:
+            time.sleep(DETECT_INTERVAL - dt)
+        last = time.monotonic()
         with _proc_lock:
             frames = list(_proc_latest.values())
             _proc_latest.clear()
@@ -223,6 +239,8 @@ def _detection_worker():
                 motion_manager.detect(frame)
             except Exception as e:
                 logger.error(f"Motion detection error: {e}")
+        # Yield so a burst of queued frames can't monopolize the GIL.
+        time.sleep(0.01)
 
 
 _detection_thread = _threading.Thread(
